@@ -1,0 +1,8 @@
+sift/
+siftsmall/
+build/
+cbin/
+.*.sw*
+.ipynb_checkpoints/
+*.pyc
+test.cpp
