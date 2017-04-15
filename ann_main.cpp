@@ -7,6 +7,7 @@
 #include <cassert>
 
 #define NUM_TYPES 7
+#define DATASET "sift"
 
 template <class T> bool readBinaryVec(const std::string& fname, std::vector<std::vector<T>>* out) {
   FILE* f = fopen(fname.c_str(), "rb");
@@ -68,17 +69,11 @@ template <class T> size_t intersectSize(T* a, T* b) {
 }
 
 void buildTree(KTree* tree, const std::vector<std::vector<float>>& baseF) {
-  StopWatch buildTimer;
-  buildTimer.start();
-  for (int i = 0; i < baseF.size(); i++) {
+  double t = progressBar(0, baseF.size(), [&baseF, tree](int i) {
     std::vector<double> row(baseF[i].begin(), baseF[i].end());
     tree->add(row.data(), 0);
-    if (i%10000 == 0) {
-      printf("%d\r", i);
-      fflush(stdout);
-    }
-  }
-  printf("Build: %f %d %d\n", buildTimer.elapsed(), tree->size(), tree->countNodes());
+  });
+  printf("Build: %f %d %d\n", t, tree->size(), tree->countNodes());
 }
 
 void checkLookups(KTree* tree) {
@@ -122,9 +117,9 @@ int main() {
   StopWatch bruteTimer;
   StopWatch treeTimers[NUM_TYPES];
   bool res = true;
-  res &= readBinaryVec("sift/base.fvecs", &baseF);
-  res &= readBinaryVec("sift/query.fvecs", &queryF);
-  res &= readBinaryVec("sift/groundtruth.ivecs", &groundtruth);
+  res &= readBinaryVec(DATASET "/base.fvecs", &baseF);
+  res &= readBinaryVec(DATASET "/query.fvecs", &queryF);
+  res &= readBinaryVec(DATASET "/groundtruth.ivecs", &groundtruth);
   assert(res);
   int n = 1;
   size_t intersectCount[NUM_TYPES] = {0}; 
@@ -139,24 +134,19 @@ int main() {
      5 // &VQTree::searchMultiLeafPlane,     
      6 // &VQTree::searchMultiLeafPlaneRecur,     
   */
-  int types[] = {1, 2, 3, 4, 5, 6};
+  int types[] = {2, 5, 6};
 
-  KTree tree(baseF[0].size(), baseF.size(), 64, 16, 100, 100, false);
+  KTree tree(baseF[0].size(), baseF.size(), 64, 16, 100, 100, -1, false);
   buildTree(&tree, baseF);
   //buildTree(&tree, baseF);
   //checkLookups(&tree);
-  checkBins(&tree);
+  //checkBins(&tree);
 
 
   //queryF.resize(100);
-  for (int i = 0; i < queryF.size(); i++) {
+  progressBar(0, queryF.size(), [&](int i) {
     std::vector<double> query(queryF[i].begin(), queryF[i].end());
     std::vector<int> truth(groundtruth[i].begin(), groundtruth[i].begin()+n);
-
-    if (i%100 == 0) {
-      printf("%d\r", i);
-      fflush(stdout);
-    }
 
       //bruteTimer.start();
       //auto bruteResult = bruteForce(baseF, queryF[i], n);
@@ -171,7 +161,7 @@ int main() {
       intersectCount[type] += intersectSize(&truth, result);
       delete result;
     }
-  }
+  });
 
   auto leafStats = tree.leafStats();
   std::cout << *leafStats << std::endl;
@@ -180,6 +170,6 @@ int main() {
   //printf("brute: %.1f%% accuracy, %f QPS\n", 100.*bruteCount/(double)(n*queryF.size()), queryF.size()/bruteTimer.elapsed());
   for (int type : types) {
     double qps = queryF.size()/treeTimers[type].elapsed();
-    printf("tree%d: %.1f%% accuracy, %f QPS\n", type, 100.*intersectCount[type]/(double)(n*queryF.size()), qps);
+    printf("search%d: %.1f%% accuracy, %f QPS\n", type, 100.*intersectCount[type]/(double)(n*queryF.size()), qps);
   }
 }

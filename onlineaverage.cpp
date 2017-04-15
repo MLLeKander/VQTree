@@ -1,3 +1,4 @@
+#include <cassert>
 #include <algorithm>
 
 //TODO: This requires 2x memory than it absolutely needs to...

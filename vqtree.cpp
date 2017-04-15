@@ -9,7 +9,7 @@
 #include <queue>
 #include <map>
 #include "prettyprint.hpp"
-#undef DNDEBUG
+//#undef DNDEBUG
 
 int VQ_NODE_COUNT = 0;
 
@@ -58,18 +58,18 @@ template <class K, class V> class MinNMap : public std::multimap<K,V> {
 };
 
 template <class Node_> class VQTreeNode {
-  private:
+  public:
     int _id = VQ_NODE_COUNT++;
     //TODO: Smart pointer?
     std::deque<int>* _contents;
     OnlineAverage _pos;
 
-  public:
     typedef Node_ Node;
     typedef VQTree<Node> Tree;
     Node* parent;
     Tree* tree;
 
+  public:
     VQTreeNode(Tree* tree) : VQTreeNode(tree, nullptr) {}
 
     VQTreeNode(Tree* tree, Node* parent) : _contents(new std::deque<int>()),
@@ -82,7 +82,8 @@ template <class Node_> class VQTreeNode {
     inline int id() { return _id; }
     inline OnlineAverage* pos() { return &_pos; }
     inline bool isRoot() { return parent == nullptr; }
-    inline bool isLeaf() { return numChildren() == 0; }
+    //inline bool isLeaf() { return numChildren() == 0; }
+    inline bool isLeaf() { return _contents != nullptr; }
     inline std::deque<int>* contents() { return _contents; }
 
     inline void freeContents() {
@@ -118,6 +119,7 @@ template <class Node> class VQTree {
     size_t branchFactor;
     size_t minLeaves;
     size_t minN;
+    double spill;
     Node* root;
     LookupSet* nodeLookup;
     double* dat;
@@ -125,9 +127,10 @@ template <class Node> class VQTree {
     bool removeDups;
 
   public:
-    VQTree(size_t dim, size_t maxSize, size_t maxLeafSize=64, size_t branchFactor=16, size_t minLeaves=100, size_t minN=100, bool removeDups=true) :
+    VQTree(size_t dim, size_t maxSize, size_t maxLeafSize=64, size_t branchFactor=16, size_t minLeaves=100, size_t minN=100, double spill=-1., bool removeDups=true) :
         dim(dim), maxSize(maxSize), maxLeafSize(maxLeafSize), branchFactor(branchFactor),
-        minLeaves(minLeaves), minN(minN), root(new Node(this)), nodeLookup(new LookupSet[maxSize]),
+        minLeaves(minLeaves), minN(minN), spill(spill),
+        root(new Node(this)), nodeLookup(new LookupSet[maxSize]),
         dat(new double[dim*maxSize]), lbl(new double[dim*maxSize]), removeDups(removeDups) {}
 
     ~VQTree() {
@@ -180,7 +183,7 @@ template <class Node> class VQTree {
       return minNode;
     }
 
-    double query(double* data, int type=3) {
+    double query(double* data, int type=5) {
       double sum = 0, norm = 0;
       auto callback = [this, &sum, &norm](Node* node, double* data) {
         for (size_t i = 0; i < node->contents()->size(); i++) {
@@ -316,9 +319,10 @@ template <class Node> class VQTree {
       return out;
     }
 
-    void printTree() {
+    void printTree() { printTree(root); }
+    void printTree(Node* start) {
       std::stack<Node*> stack;
-      stack.push(root);
+      stack.push(start);
 
       int depth = 0;
       while (stack.size() > 0) {
@@ -338,25 +342,6 @@ template <class Node> class VQTree {
       }
       fflush(stdout);
     }
-    /*void printTree() {
-      std::stack<Node*> nodeStack;
-      std::stack<int> ndxStack;
-      Node* tmp = root;
-
-      int depth = 0;
-      while (tmp != nullptr) {
-        printNode(tmp, depth);
-
-        if (!tmp->isLeaf()) {
-          stack.push(0);
-        } else {
-          while (stack.size() > 0 && stack.top() == tmp->numChildren()) {
-            tmp = tmp->parent;
-          }
-        }
-      }
-      fflush(stdout);
-    }*/
 
   private:
     template <typename Func> void search(double* query, int type, const Func& callback) {
@@ -567,7 +552,7 @@ template <class Node> class VQTree {
       printIndent(depth);
       printf("%d ", node->id());
       //printData(node->pos()->position());
-      //printf(" %p(%p[%d]) ", node, node->parent, node->childNdx);
+      //printf("(%d) ", node->pos()->count);
 
       if (node->isLeaf()) {
         putchar('\n');
@@ -670,14 +655,6 @@ class MeanTreeNode : public VQTreeNode<MeanTreeNode> {
     }
 
     void remove(int ndx) {
-      //TODO: Update
-#ifndef NDEBUG
-      if (isLeaf()) {
-        //printf("Node::remove id:%d ndx:%d front:%d\n",id, ndx, contents()->front());
-        assert(contents()->front() == ndx);
-      }
-#endif
-
       if (isLeaf() && !isRoot() && contents()->size() == 1) {
         Node* sibling = this == parent->childA ? parent->childB : parent->childA;
         if (parent->isRoot()) {
@@ -770,69 +747,51 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
     int add(int ndx) {
       double* data = tree->getData(ndx);
       double label = tree->getLabel(ndx);
+      int out = -1;
 
-      Node* tmp = this;
-      while (!tmp->isLeaf()) {
-        tmp->pos()->add(data, label);
-        tmp = tree->closestChild(tmp, data);
-      }
-      tree->registerLeaf(tmp, ndx);
+      if (tree->spill >= 0) {
+        double* dists = new double[tree->branchFactor];
+        std::queue<Node*> q;
+        q.push(this);
+        while (q.size() > 0) {
+          Node* tmp = q.front();
+          q.pop();
+          if (tmp->isLeaf()) {
+            out = std::max(out, tmp->addToLeaf(ndx, data, label));
+            continue;
+          }
 
-      if (!tree->removeDups) {
-        tmp->addToLeaf(ndx, data, label);
-        return -1;
-      }
+          int nChildren = tmp->numChildren();
+          for (int i = 0; i < nChildren; i++) {
+            dists[i] = tree->dist(data, tmp->child(i)->pos()->position());
+          }
+          auto minChildP = std::min_element(dists, dists+nChildren);
+          int minNdx = minChildP - dists;
+          Node* minChild = tmp->child(minNdx);
+          double* minPos = minChild->pos()->position();
 
-      std::deque<int>* contents = tmp->contents();
-      auto matchPtr = std::find_if(contents->begin(), contents->end(), [data, this](int i) {
-        return doesMatch(data, tree->getData(i));
-      });
+          q.push(minChild);
 
-      if (matchPtr == contents->end()) {
-        tmp->addToLeaf(ndx, data, label);
-        return -1;
-      }
-
-      int out = *matchPtr;
-      tree->unregisterLeaf(tmp, out);
-      *matchPtr = ndx;
-      while (!tmp->isRoot()) {
-        tmp = tmp->parent;
-        tmp->pos()->remove(data, label);
-      }
-      return out;
-      /*std::deque<int>* contents = tmp->contents();
-      int matchCNdx = -1, matchNdx = -1;
-      for (size_t tmpCNdx = 0; tmpCNdx < contents->size(); tmpCNdx++) {
-        int tmpNdx = (*contents)[tmpCNdx];
-        if (doesMatch(data, tree->getData(tmpNdx))) {
-          matchCNdx = tmpCNdx;
-          matchNdx = tmpNdx;
-          break;
-        }
-      }
-
-      tree->registerLeaf(tmp, ndx);
-      if (matchNdx == -1) {
-        tmp->pos()->add(data, label);
-        tmp->contents()->push_back(ndx);
-
-        if (tmp->contents()->size() > tree->maxLeafSize) {
-          if (tmp->isRoot()) {
-            tmp->makeRootNode(tmp->splitLeaf());
-          } else {
-            tmp->parent->addChild(tmp->splitLeaf());
+          for (int i = 0; i < nChildren; i++) {
+            if (i == minNdx) { continue; }
+            Node* tmpChild = tmp->child(i);
+            double* tmpChildPos = tmpChild->pos()->position();
+            double tmpDTP = tree->relDistToPlane(dists[minNdx], dists[i], minPos, tmpChildPos);
+            if (tmpDTP < tree->spill) {
+              q.push(tmpChild);
+            }
           }
         }
+        delete[] dists;
       } else {
-        tree->unregisterLeaf(tmp, matchNdx);
-        (*contents)[matchCNdx] = ndx;
-        while (!tmp->isRoot()) {
-          tmp = tmp->parent;
-          tmp->pos()->remove(data, label);
+        Node* tmp = this;
+        while (!tmp->isLeaf()) {
+          tmp = tree->closestChild(tmp, data);
         }
+        tmp->addToLeaf(ndx, data, label);
       }
-      return matchNdx;*/
+
+      return out;
     }
 
     void remove(int ndx) {
@@ -865,20 +824,62 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
     }
 
     bool checkInvariant() {
+      for (size_t i = 0; i < numChildren(); i++) {
+        if (!child(i)->checkInvariant()) {
+          return false;
+        }
+      }
+      if (!checkInvariantLocal()) {
+        return false;
+      }
+      return true;
+    }
+    bool checkInvariantLocal() {
+      if (!std::isfinite(pos()->position()[0])) {
+        printf("Fail PosFinite: %f\n", pos()->position()[0]);
+        return false;
+      }
       if (!isLeaf()) {
+        if (numChildren() > tree->branchFactor) {
+          printf("Fail BranchFactor: %d vs %zu\n", numChildren(), tree->branchFactor);
+          return false;
+        }
+        int childPosCount = 0;
         for (size_t i = 0; i < children->size(); i++) {
           Node* child = (*children)[i];
+          childPosCount += child->pos()->count;
           if (child->parent != this || child->childNdx != i) {
-            return false;
-          }
-          //assert(child->parent == this);
-          //assert(child->childNdx == i);
-          if (!child->checkInvariant()) {
+            puts("Fail Parent/ChildNdx");
             return false;
           }
         }
+        if (pos()->count != childPosCount) {
+          printf("Fail PosCount: %d vs %d\n", pos()->count, childPosCount);
+          return false;
+        }
+      } else {
+        if (contents()->size() > tree->maxLeafSize) {
+          printf("Fail MaxLeafSize: %zu vs %zu\n", contents()->size(), tree->maxLeafSize);
+          return false;
+        }
+        if (pos()->count != contents()->size()) {
+          printf("Fail Leaf PosCount: %d vs %zu\n", pos()->count, contents()->size());
+          return false;
+        }
       }
       return true;
+    }
+
+    int distUp() {
+      int cnt = 0;
+      for (Node* tmp = this; !tmp->isRoot(); tmp = tmp->parent, cnt++) { }
+      return cnt;
+    }
+
+    int distDown() {
+      int cnt = 0;
+      for (Node* tmp = this; !tmp->isLeaf(); tmp = tmp->child(0), cnt++) { }
+      return cnt;
     }
 
   private:
@@ -944,7 +945,18 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
       newChild->childNdx = children->size();
       children->push_back(newChild);
       if (children->size() > tree->branchFactor) {
+#ifndef DNDEBUG
+        auto s1 = children->size();
+#endif
         Node* sibling = splitInner();
+#ifndef DNDEBUG
+        auto s2 = children->size(), s3 = sibling->children->size();
+        if (s2 >= s1 || s3 >= s1) {
+          printf("\n%zu -> %zu %zu\n", s1, s2, s3);
+          puts("PANIC!!!");
+          tree->printTree(this->parent);
+        }
+#endif
 
         if (isRoot()) {
           makeRootNode(sibling);
@@ -991,14 +1003,19 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
 
       std::vector<int>* labels = twoMeansInner();
       labeledMove(labels, children, sibling->children);
+#ifdef DNDEBUG
+      if (children->size() == 0 || sibling->children->size() == 0) {
+        printf("Invalid children size after move... %zu %zu\n", this->children->size(), sibling->children->size());
+        std::cout << *labels << std::endl;
+      }
+#endif
       delete labels;
 
       for (size_t i = 0; i < this->children->size(); i++) {
-        Node* tmp = (*this->children)[i];
-        tmp->childNdx = i;
+        this->child(i)->childNdx = i;
       }
       for (size_t i = 0; i < sibling->children->size(); i++) {
-        Node* tmp = (*sibling->children)[i];
+        Node* tmp = sibling->child(i);
         sibling->pos()->add(tmp->pos());
         tmp->parent = sibling;
         tmp->childNdx = i;
@@ -1062,10 +1079,24 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
       return true;
     }
 
-    void addToLeaf(int ndx, double* data, double label) {
-      pos()->add(data, label);
-      contents()->push_back(ndx);
+    int addToLeaf(int ndx, double* data, double label) {
+      tree->registerLeaf(this, ndx);
+      if (tree->removeDups) {
+        auto matchPtr = std::find_if(contents()->begin(), contents()->end(), [data, this](int i) {
+          return doesMatch(data, tree->getData(i));
+        });
+        if (matchPtr != contents()->end()) {
+          int out = *matchPtr;
+          tree->unregisterLeaf(this, out);
+          *matchPtr = ndx;
+          return out;
+        }
+      }
+      for (Node* tmp = this; tmp != nullptr; tmp = tmp->parent) {
+        tmp->pos()->add(data, label);
+      }
 
+      contents()->push_back(ndx);
       if (contents()->size() > tree->maxLeafSize) {
         if (isRoot()) {
           makeRootNode(splitLeaf());
@@ -1073,6 +1104,15 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
           parent->addChild(splitLeaf());
         }
       }
+#ifndef DNDEBUG
+      for (Node* tmp = this; tmp != nullptr; tmp = tmp->parent) {
+        if (!tmp->checkInvariantLocal()) {
+          printf("!!!!!! %d\ndistUp:%d distDown:%d id:%d\n", ndx, distUp(), distDown(), tmp->_id);
+          tree->printTree();
+        }
+      }
+#endif
+      return -1;
     }
 };
 

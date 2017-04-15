@@ -20,41 +20,38 @@ double f_noisy(double *d) {
   return f(d) + 0.05*(rand()/(double)RAND_MAX-0.5);
 }
 
-template <class Node> void test(int size, int dim, int leafSize, int branchFactor) {
-  Timer timer;
-  VQTree<Node> tree(dim, size, leafSize, branchFactor);
+template <class Node> void test(int size, int dim, int leafSize, int branchFactor, int minLeaves=50, int minN=50, double spill=-1, bool removeDups=true) {
+  VQTree<Node> tree(dim, size, leafSize, branchFactor, minLeaves, minN, spill, removeDups);
+  test(tree);
+}
+template <class Node> void test(VQTree<Node>& tree) {
+  int dim = tree.dim, size = tree.maxSize;
   double* d = new double[dim];
   srand(10);
 
-  timer.reset();
-  for (int i = 0; i < size; i++) {
+  double buildTime1 = progressBar(0, size, [&,d](int i) {
     randVec(d, dim);
     tree.add(d, f_noisy(d));
-  }
-  double buildTime1 = timer.elapsed();
+  });
   puts("build1 complete");
   //tree.printTree();
-  //fflush(stdout);
+  fflush(stdout);
 
-  timer.reset();
-  for (int i = 0; i < size; i++) {
+  double buildTime2 = progressBar(0, size, [&,d](int i) {
     randVec(d, dim);
     tree.add(d, f_noisy(d));
-  }
-  double buildTime2 = timer.elapsed();
+  });
   puts("build2 complete");
   //tree.printTree();
-  //fflush(stdout);
+  fflush(stdout);
 
-  timer.reset();
   double MSE = 0, MAE = 0;
-  for (int i = 0; i < size; i++) {
+  double queryTime = progressBar(0, size, [&,d](int i) {
     randVec(d, dim);
-    double diff = tree.query(d)-f(d);
+    double diff = tree.query(d, 2)-f(d);
     MSE += diff*diff;
     MAE += std::abs(diff);
-  }
-  double queryTime = timer.elapsed();
+  });
   puts("query complete");
   delete[] d;
 
@@ -77,12 +74,12 @@ template <class Node> void test(int size, int dim, int leafSize, int branchFacto
 
 int main(int argc, char *argv[]) {
   if (argc < 4) {
-    fprintf(stderr, "usage: %s type size dims [leafSize=5] [branchFactor=3]\n", argv[0]);
+    fprintf(stderr, "usage: %s type size dims [leafSize=64] [branchFactor=16]\n", argv[0]);
     return -1;
   }
   char type = argv[1][0];
   int size = std::stoi(argv[2]), dim = std::stoi(argv[3]);
-  int leafSize = 5, branchFactor = 3;
+  int leafSize = 64, branchFactor = 16;
   if (argc >= 5) {
     leafSize = std::stoi(argv[3]);
   }

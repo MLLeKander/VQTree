@@ -65,3 +65,16 @@ class StopWatch {
     clock_t _start = 0, _stored = 0;
 };
 
+template <class Func> double progressBar(size_t min, size_t max, const Func& callback, double refreshRate=2.0) {
+  clock_t prevClock = clock(), startClock = prevClock;
+  for (size_t i = min; i < max; i++) {
+    callback(i);
+    clock_t currClock = clock();
+    if ((currClock-prevClock)*refreshRate >= CLOCKS_PER_SEC) {
+      printf("%zu\r", i);
+      fflush(stdout);
+      prevClock = currClock;
+    }
+  }
+  return (clock()-startClock)/(double)CLOCKS_PER_SEC;
+}
