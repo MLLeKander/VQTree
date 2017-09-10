@@ -5,14 +5,14 @@
 #include <cassert>
 #include <stack>
 #include <iostream>
-#include <queue>
-#include <map>
 #include <cstdint>
-#include <bitset>
+#include <numeric>
+#include <random>
 #include "prettyprint.hpp"
+#include "utils.hpp"
 //#undef DNDEBUG
 
-#define BITSET_DIM 32
+#define MAX_ITERS 50
 
 int VQ_NODE_COUNT = 0;
 
@@ -20,45 +20,6 @@ template <class Node> class VQTree;
 
 class KTreeNode;
 
-template <class T> class MinNQueue : public std::priority_queue<T> {
-  public:
-    size_t n;
-    MinNQueue(size_t n) : n(n) {}
-
-    inline void add(const T& value) {
-      if (this->size() < n) {
-        this->push(value);
-      } else if (value < this->top()) {
-        this->pop();
-        this->push(value);
-      }
-    }
-
-    inline bool isMature() {
-      return this->size() >= n;
-    }
-
-    inline std::vector<T>* container() { return &this->c; }
-};
-
-template <class K, class V> class MinNMap : public std::multimap<K,V> {
-  public:
-    size_t n;
-    MinNMap(size_t n) : n(n) {}
-
-    inline void add(const K& key, const V& value) {
-      if (this->size() < n) {
-        this->emplace(key,value);
-      } else if (n > 0 && key < this->rbegin()->first) {
-        this->erase(std::prev(this->end()));
-        this->emplace(key,value);
-      }
-    }
-
-    inline bool isMature() {
-      return this->size() == n;
-    }
-};
 
 template <class Node_> class VQTreeNode {
   public:
@@ -97,73 +58,65 @@ template <class Node_> class VQTreeNode {
     }
 
     inline void freeTree() {
-      for (int i = 0; i < numChildren(); i++) {
+      for (size_t i = 0; i < numChildren(); i++) {
         child(i)->freeTree();
       }
       delete this;
     }
 
-    virtual int numChildren() = 0;
+    virtual size_t numChildren() = 0;
     virtual Node* child(int ndx) = 0;
     virtual int add(int ndx) = 0;
     virtual void remove(int ndx) = 0;
     virtual double* childPosition(int ndx) { return child(ndx)->position(); }
 };
 
-template <class Node> class VQTree {
+template <class Node> class VQForest {
   public:
     using MinDistQ = MinNQueue<std::pair<double, int>>;
-    using LookupSet = std::unordered_set<Node*>;
+    using Tree = VQTree<Node>;
+    std::vector<Tree*> trees;
     size_t currNdx = 0;
     bool wrap = false;
-
     size_t dim;
-    size_t maxSize;
-    size_t maxLeafSize;
-    size_t branchFactor;
+    size_t memorySize;
+
     size_t minLeaves;
-    size_t minN;
-    double spill;
+    size_t minN = -1;
+    double exactEps;
     int defaultSearchType;
 
-    Node* root;
-    LookupSet* nodeLookup;
     double* dat;
     double* lbl;
-
-    bool removeDups;
-    std::bitset<BITSET_DIM>* driftHist;
-    size_t driftThreshold;
-    uint32_t driftMask;
-    long driftCount = 0;
+    std::default_random_engine randEngine;
 
   public:
-    VQTree(size_t dim, size_t maxSize, size_t maxLeafSize=64, size_t branchFactor=16, size_t minLeaves=100, size_t minN=100, int searchType=3, double spill=-1., bool removeDups=true, size_t driftHistLen=5, size_t driftThreshold=4) :
-        dim(dim), maxSize(maxSize), maxLeafSize(maxLeafSize), branchFactor(branchFactor),
-        minLeaves(minLeaves), minN(minN), spill(spill), defaultSearchType(searchType),
-        root(new Node(this)), nodeLookup(new LookupSet[maxSize]),
-        dat(new double[dim*maxSize]), lbl(new double[dim*maxSize]),
-        removeDups(removeDups), driftHist(new std::bitset<BITSET_DIM>[maxSize]),
-        driftThreshold(driftThreshold) {
-      driftMask = 0;
-      for (size_t i = 0; i < driftHistLen; i++) {
-        driftMask = (driftMask << 1) | 1;
+    VQForest(size_t dim, size_t memorySize, size_t maxLeafSize, size_t branchFactor, double spill, bool removeDups, size_t numTrees, size_t minLeaves, double exactEps, int searchType, long randSeed) :
+        dim(dim), memorySize(memorySize), minLeaves(minLeaves), exactEps(exactEps),
+        defaultSearchType(searchType), dat(new double[dim*memorySize]),
+        lbl(new double[memorySize]), randEngine(randSeed) {
+      assert(numTrees > 0);
+      for (size_t i = 0; i < numTrees; i++) {
+        trees.push_back(new Tree(dim, memorySize, maxLeafSize, branchFactor, spill, removeDups, this));
+      }
+      for (size_t i = 0; i < dim*memorySize; i++) {
+        dat[i] = i;
+      }
+      for (size_t i = 0; i < memorySize; i++) {
+        lbl[i] = i;
       }
     }
 
-    ~VQTree() {
-      root->freeTree();
-      delete[] nodeLookup;
+    ~VQForest() {
       delete[] dat;
       delete[] lbl;
-      delete[] driftHist;
     }
 
     double* getData(int ndx) { return dat+dim*ndx; }
     double getLabel(int ndx) { return lbl[ndx]; }
 
-    void add(double* data, double label) {
-      if (currNdx >= maxSize) {
+    int add(double* data, double label) {
+      if (currNdx >= memorySize) {
         wrap = true;
         currNdx = 0;
       }
@@ -171,31 +124,187 @@ template <class Node> class VQTree {
       if (wrap) {
         clear(ndx);
       }
-      if (driftThreshold > 0) {
-        driftHist[ndx].reset();
-        enforceDriftConsistency(data, label);
-      }
       std::memcpy(getData(ndx), data, dim*sizeof(*data));
       lbl[ndx] = label;
-      int oldNdx = root->add(ndx);
-      if (oldNdx != -1) {
-        lbl[ndx] = (.1)*lbl[oldNdx] + .9*lbl[ndx];
-        clear(oldNdx);
+      for (Tree* tree : trees) {
+        int oldNdx = tree->add(ndx);
+        if (oldNdx != -1) {
+          lbl[ndx] = std::max(lbl[oldNdx], lbl[ndx]);
+          clear(oldNdx);
+        }
+      }
+        
+      return ndx;
+    }
+
+    size_t clear(int ndx) {
+      size_t out = 0;
+      for (Tree* tree : trees) {
+        out += tree->clear(ndx);
+      }
+      return out;
+    }
+
+    std::vector<int>* nearestNeighborsNdxes(double* queryData, int n, int searchType=-1) {
+      MinDistQ* q = nearestNeighbors(queryData, n, searchType);
+      std::vector<int>* out = new std::vector<int>();
+      for (auto pair : *q->container()) {
+        out->push_back(pair.second);
+      }
+      delete q;
+      return out;
+    }
+
+    MinDistQ* nearestNeighbors(double* queryData, int n, int searchType=-1) {
+      if (searchType == -1) {
+        searchType = defaultSearchType;
+      }
+
+      minN = n;
+      MinDistQ* q = new MinDistQ(n);
+      std::unordered_set<int> visited;
+      auto callback = [this, queryData, &visited, q](Node* node) {
+        for (int i : *node->contents()) {
+          if (!visited.insert(i).second) {
+            continue;
+          }
+          q->add(std::make_pair(dist(getData(i), queryData), i));
+        }
+      };
+
+      for (Tree* tree : trees) {
+        tree->search(queryData, callback, searchType, nullptr);
+      }
+      std::sort(q->container()->begin(), q->container()->end());
+      return q;
+    }
+
+    bool isActive(size_t ndx) {
+      for (Tree* tree : trees) {
+        if (!tree->isActive(ndx)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    size_t enforceTreeConsistencyFull() {
+      size_t out = 0;
+      for (Tree* tree : trees) {
+        out += tree->enforceTreeConsistencyFull();
+      }
+      return out;
+    }
+
+    size_t enforceTreeConsistencyAt(size_t ndx) {
+      size_t out = 0;
+      for (Tree* tree : trees) {
+        if (tree->enforceTreeConsistencyAt(ndx)) {
+          out++;
+        }
+      }
+      return out;
+    }
+
+    size_t enforceTreeConsistencyRandom() {
+      size_t out = 0;
+      for (Tree* tree : trees) {
+        if (tree->enforceTreeConsistencyRandom()) {
+          out++;
+        }
+      }
+      return out;
+    }
+
+    size_t size() {
+      return wrap ? memorySize : currNdx;
+    }
+
+    int countNodes() {
+      int out = 0;
+      for (Tree* tree : trees) {
+        out += tree->countNodes();
+      }
+      return out;
+    }
+
+    std::vector<int>* leafStats() {
+      std::vector<int>* out = new std::vector<int>();
+      out->push_back(-1);
+      for (Tree* tree : trees) {
+        tree->leafStats(out);
+        out->push_back(-1);
+      }
+      return out;
+    }
+
+    void printTree() {
+      const char* sep = "";
+      for (Tree* tree : trees) {
+        printf("%s", sep);
+        sep = " ----------\n";
+        tree->printTree();
       }
     }
 
-    void clear(int ndx) {
-      for (Node* tmpNode : nodeLookup[ndx]) {
+    double dist(double* a, double* b) {
+      double out = 0, tmp;
+      for (size_t i = 0; i < dim; i++) {
+        tmp = a[i]-b[i];
+        out += tmp*tmp;
+      }
+      return out;
+    }
+};
+
+template <class Node> class VQTree {
+  public:
+    using LookupSet = std::unordered_set<Node*>;
+
+    size_t dim;
+    size_t maxLeafSize;
+    size_t branchFactor;
+
+    Node* root;
+    double spill;
+    LookupSet* leafLookup;
+
+    bool removeDups;
+    VQForest<Node>* forest;
+
+  public:
+    VQTree(size_t dim, size_t memorySize, size_t maxLeafSize, size_t branchFactor, double spill, bool removeDups, VQForest<Node>* forest) :
+        dim(dim), maxLeafSize(maxLeafSize), branchFactor(branchFactor),
+        root(new Node(this)), spill(spill),
+        leafLookup(new LookupSet[memorySize]), removeDups(removeDups), forest(forest) {
+    }
+
+    ~VQTree() {
+      root->freeTree();
+      delete[] leafLookup;
+    }
+
+    double* getData(int ndx) { return forest->getData(ndx); }
+    double getLabel(int ndx) { return forest->getLabel(ndx); }
+
+    int add(int ndx) {
+      return root->add(ndx);
+    }
+
+    size_t clear(int ndx) {
+      size_t out = leafLookup[ndx].size();
+      for (Node* tmpNode : leafLookup[ndx]) {
         tmpNode->remove(ndx);
       }
-      nodeLookup[ndx].clear();
+      leafLookup[ndx].clear();
+      return out;
     }
 
     Node* closestChild(Node* n, double* data) {
       assert(!n->isLeaf());
       double minDist = DBL_MAX;
       Node* minNode = nullptr;
-      for (int i = 0; i < n->numChildren(); i++) {
+      for (size_t i = 0; i < n->numChildren(); i++) {
         Node* tmpNode = n->child(i);
         double tmpDist = dist(tmpNode->position(), data);
         if (tmpDist < minDist) {
@@ -206,109 +315,46 @@ template <class Node> class VQTree {
       return minNode;
     }
 
-    double query(double* queryData, int searchType=-1) {
-      double sum = 0, norm = 0;
-      auto callback = [this, queryData, &sum, &norm](Node* node) {
-        for (size_t i = 0; i < node->contents()->size(); i++) {
-          double k = kernel(getData((*node->contents())[i]), queryData);
-          double lbl = getLabel((*node->contents())[i]);
-          sum += lbl*k;
-          norm += k;
-        }
-      };
-      search(queryData, callback, searchType);
-      return sum / norm;
+    bool isActive(size_t ndx) {
+      return leafLookup[ndx].size() > 0;
     }
 
-    std::vector<int>* nearestNeighbors(double* queryData, int n, int searchType=-1) {
-      MinDistQ q(n);
-      auto callback = [this, queryData, &q](Node* node) {
-        for (int i : *node->contents()) {
-          q.add(std::make_pair(dist(getData(i), queryData), i));
-        }
-      };
-      search(queryData, callback, searchType);
-      std::sort(q.container()->begin(), q.container()->end());
-
-      std::vector<int>* out = new std::vector<int>();
-      for (auto pair : *q.container()) {
-        out->push_back(pair.second);
-      }
-      return out;
-    }
-
-    //TODO: Not accurate for spill
-    void enforceDriftConsistency(double* queryData, double target, int searchType=5) {
-      driftCount = 0;
-      double sum = 0, norm = 0;
-      std::unordered_set<int> visited;
-      std::vector<std::tuple<Node*,int,double,double>> candidates;
-      //TODO: Why duplicates?
-      auto callback = [this, queryData, &sum, &norm, &candidates, &visited](Node* node) {
-        //for (size_t i = 0; i < node->contents()->size(); i++) {
-        //  double k = kernel(getData((*node->contents())[i]), queryData);
-        //  double lbl = getLabel((*node->contents())[i]);
-        for (int i : *node->contents()) {
-          if (visited.find(i) != visited.end()) { continue; }
-          visited.insert(i);
-          double k = kernel(getData(i), queryData);
-          double lbl = getLabel(i);
-          sum += lbl*k;
-          norm += k;
-          candidates.push_back(std::make_tuple(node, i, k, lbl));
-        }
-      };
-      search(queryData, callback, searchType);
-
-      double prediction = sum/norm;
-      double predictionErr = std::abs(target - prediction);
-      //std::cout << "candidates: " << candidates << std::endl;
-      for (auto &candidate : candidates) {
-        Node* node = std::get<0>(candidate);
-        int ndx = std::get<1>(candidate);
-        double k = std::get<2>(candidate);
-        double lbl = std::get<3>(candidate);
-        double subPrediction = (sum-lbl*k) / (norm-k);
-        double subPredictionErr = std::abs(target - subPrediction);
-
-        driftHist[ndx] <<= 1;
-        driftHist[ndx] &= driftMask;
-        if (subPredictionErr < predictionErr - 1e-10) {
-          //printf("Marking %d: %.4f vs %.4f (%.4f, %.4f)\n", ndx, prediction, subPrediction, k, lbl);
-          driftHist[ndx] |= 1;
-          if (driftHist[ndx].count() >= driftThreshold) {
-            //printf("Evicting %d (%.4f, %.4f)\n", ndx, k, lbl);
-            driftCount++;
-            node->remove(ndx);
-            unregisterLeaf(node, ndx);
-            //TODO: Rebalance prediction?
-            //sum -= lbl*k;
-            //norm -= k;
-            //predictionErr = std::abs(target - sum/norm);
+    size_t enforceTreeConsistencyFull() {
+      size_t cycles = 0, errs = 1;
+      while (errs > 0) {
+        errs = 0;
+        for (size_t i = 0; i < forest->size(); i++) {
+          if (enforceTreeConsistencyAt(i)) {
+            errs++;
           }
         }
+        fprintf(stderr, "errs:%zu\n",errs);
+        cycles++;
       }
+      return cycles;
+    }
+    bool enforceTreeConsistencyAt(size_t ndx) {
+      if (!isActive(ndx)) {
+        return false;
+      }
+      std::deque<int>* defeatist = nearestLeaf(root, getData(ndx))->contents();
+      if (!contains(defeatist, ndx)) {
+        clear(ndx);
+        root->add(ndx);
+        return true;
+      }
+      return false;
+    }
 
-      //for (Node* node : nodes) {
-      //  for (int i : *node->contents()) {
-      //  //for (size_t i = 0; i < node->contents()->size(); i++) {
-      //    double k = kernel(getData(i), queryData);
-      //    double lbl = getLabel(i);
-      //    double subPredictionErr = std::abs(target - (sum-lbl*k) / (norm-k));
-      //    driftHist[i] <<= 1;
-      //    driftHist[i] &= driftMask;
-      //    if (subPredictionErr > predictionErr) {
-      //      driftHist[i] |= 1;
-      //      if (driftHist[i].count() >= driftThreshold) {
-      //        node->remove(i);
-      //        //TODO: Rebalance prediction?
-      //        //sum -= lbl*k;
-      //        //norm -= k;
-      //        //predictionErr = std::abs(target - sum/norm);
-      //      }
-      //    }
-      //  }
-      //}
+    bool enforceTreeConsistencyRandom() {
+      std::uniform_int_distribution<int> distribution(0, forest->size()-1);
+      for (int i = 0; i < MAX_ITERS; i++) {
+        int ndx = distribution(forest->randEngine);
+        if (isActive(ndx)) {
+          return enforceTreeConsistencyAt(ndx);
+        }
+      }
+      return false;
     }
 
     Node* nearestLeaf(Node* tmp, double* query) {
@@ -316,10 +362,6 @@ template <class Node> class VQTree {
         tmp = closestChild(tmp, query);
       }
       return tmp;
-    }
-
-    int size() {
-      return wrap ? maxSize : currNdx;
     }
 
     int countNodes() {
@@ -331,7 +373,7 @@ template <class Node> class VQTree {
         q.pop_front();
         out++;
         if (!node->isLeaf()) {
-          for (int i = 0; i < node->numChildren(); i++) {
+          for (size_t i = 0; i < node->numChildren(); i++) {
             q.push_back(node->child(i));
           }
         }
@@ -339,14 +381,14 @@ template <class Node> class VQTree {
       return out;
     }
 
-    double dist(double* a, double* b) {
-      double out = 0, tmp;
-      for (size_t i = 0; i < dim; i++) {
-        tmp = a[i]-b[i];
-        out += tmp*tmp;
-      }
-      return out;
-    }
+    double dist(double* a, double* b) { return forest->dist(a,b); }
+    //  double out = 0, tmp;
+    //  for (size_t i = 0; i < dim; i++) {
+    //    tmp = a[i]-b[i];
+    //    out += tmp*tmp;
+    //  }
+    //  return out;
+    //}
 
     inline double relDistToPlane(double* p, double* wPlus, double* wMinus) {
       return relDistToPlane(dist(p,wPlus), dist(p,wMinus), dist(wPlus,wMinus));
@@ -369,24 +411,21 @@ template <class Node> class VQTree {
       return dDiff*dDiff / (4 * dPM);
     }
 
-    inline double kernel(double dist) {
-      return 1/(dist+1e-5);
-    }
-
-    inline double kernel(double* a, double* b) {
-      return 1/(dist(a,b)+1e-5);
-    }
-
     void registerLeaf(Node* n, int ndx) {
-      nodeLookup[ndx].insert(n);
+      leafLookup[ndx].insert(n);
     }
 
     void unregisterLeaf(Node* n, int ndx) {
-      nodeLookup[ndx].erase(n);
+      leafLookup[ndx].erase(n);
     }
 
     std::vector<int>* leafStats() {
       std::vector<int>* out = new std::vector<int>();
+      leafStats(out);
+      return out;
+    }
+
+    void leafStats(std::vector<int>* out) {
       std::deque<Node*> q;
       Node* node;
       q.push_back(root);
@@ -399,7 +438,7 @@ template <class Node> class VQTree {
             leafCount += node->contents()->size();
           } else {
             innerCount++;
-            for (int i = 0; i < node->numChildren(); i++) {
+            for (size_t i = 0; i < node->numChildren(); i++) {
               q.push_back(node->child(i));
             }
           }
@@ -410,8 +449,6 @@ template <class Node> class VQTree {
         q.push_back(nullptr);
       }
       q.clear();
-
-      return out;
     }
 
     void printTree() { printTree(root); }
@@ -438,26 +475,29 @@ template <class Node> class VQTree {
       fflush(stdout);
     }
 
-  private:
-    template <typename Func> void search(double* query, const Func& callback, int searchType=-1) {
-      using SearchMethod = void (VQTree::*)(double*, const Func&);
-      if (searchType == -1) {
-        searchType = defaultSearchType;
-      }
+    template <typename Func> void search(double* query, const Func& callback, int searchType, va_list* args) {
+      using SearchMethod = void (VQTree::*)(double*, const Func&, va_list*);
+#define VQSEARCH_BRUTE 0
+#define VQSEARCH_EXACT 1
+#define VQSEARCH_DEFEATIST 2
+#define VQSEARCH_PROT_DIST 3
+#define VQSEARCH_PLANE_DIST 4
+#define VQSEARCH_LEAFGRAPH 5
       static SearchMethod searches[] = {
         /*0*/ &VQTree::searchBrute,
         /*1*/ &VQTree::searchExact,
         /*2*/ &VQTree::searchDefeatist,
         /*3*/ &VQTree::searchMultiLeafProt,
-        /*4*/ &VQTree::searchMultiLeafProtRecur,
-        /*5*/ &VQTree::searchMultiLeafPlane,
-        /*6*/ &VQTree::searchMultiLeafPlaneRecur,
+        /*4*/ &VQTree::searchMultiLeafPlane,
+        /*5*/ &VQTree::searchLeafGraph,
       };
-      (this->*searches[searchType])(query, callback);
+      (this->*searches[searchType])(query, callback, args);
     }
 
-    template <typename Func> void searchBrute(double* query, const Func& callback) {
-      std::stack<int> ndxes;
+  private:
+    // args: ???
+    template <typename Func> void searchBrute(double* query, const Func& callback, va_list* args) {
+      std::stack<size_t> ndxes;
       ndxes.push(0);
 
       Node* tmp = root;
@@ -475,27 +515,33 @@ template <class Node> class VQTree {
         }
       }
     }
-    template <typename Func> void searchExact(double* query, const Func& callback) {
-      MinNQueue<double> closest(minN);
-      searchExact(root, query, &closest, callback);
+
+    // args: minN
+    template <typename Func> void searchExact(double* query, const Func& callback, va_list* args) {
+      assert(forest->minN > 0);
+      MinNQueue<double> closest(forest->minN);
+      std::unordered_set<int> visited;
+      searchExact(root, query, &closest, &visited, callback);
     }
-    template <typename Func> void searchExact(Node* node, double* query, MinNQueue<double>* closest, const Func& callback) {
-      //TODO: Why is this not actually exact.. ?
+    template <typename Func> void searchExact(Node* node, double* query, MinNQueue<double>* closest, std::unordered_set<int>* visited, const Func& callback) {
       if (node->isLeaf()) {
         for (int i : *node->contents()) {
-          closest->add(i);
+          if (visited->insert(i).second) {
+            closest->add(dist(getData(i), query));
+          }
         }
         callback(node);
         return;
       }
 
-      int numChildren = node->numChildren();
+      size_t numChildren = node->numChildren();
       std::vector<std::pair<double, Node*>> dists;
       dists.reserve(numChildren);
-      for (int i = 0; i < numChildren; i++) {
+      for (size_t i = 0; i < numChildren; i++) {
         Node* tmpChild = node->child(i);
         dists.emplace_back(dist(tmpChild->position(), query), tmpChild);
       }
+      //std::cout << "dists: " << dists << std::endl;
       std::sort(dists.begin(), dists.end());
 
       std::pair<double, Node*> minPair = dists[0];
@@ -503,154 +549,135 @@ template <class Node> class VQTree {
       Node* minNode = minPair.second;
       double* minPos = minNode->position();
 
-      searchExact(minNode, query, closest, callback);
-      for (int i = 1; i < numChildren; i++) {
+      searchExact(minNode, query, closest, visited, callback);
+      for (size_t i = 1; i < numChildren; i++) {
         std::pair<double, Node*> tmp = dists[i];
         
         double tmpDistToPlane = distToPlane(minDist, tmp.first, minPos, tmp.second->position());
-        if (!closest->isMature() || tmpDistToPlane < closest->top()) {
-          searchExact(tmp.second, query, closest, callback);
+        if (!closest->isMature() || tmpDistToPlane*(1.0+forest->exactEps) < closest->top()) {
+          searchExact(tmp.second, query, closest, visited, callback);
         }
       }
     }
 
-    template <typename Func> void searchDefeatist(double* query, const Func& callback) {
-      puts("This shouldn't be here.");
-      Node* tmp = nearestLeaf(root, query)->parent;
-      for (int i = 0; i < tmp->numChildren(); i++) {
-        callback(tmp->child(i));
-      }
-      //callback(nearestLeaf(root, query));
+    // args: none
+    template <typename Func> void searchDefeatist(double* query, const Func& callback, va_list* args) {
+      callback(nearestLeaf(root, query));
+      //Node* leaf = nearestLeaf(root, query);
+      //Node* tmp = leaf->parent;
+      //if (tmp != NULL) {
+      //  for (size_t i = 0; i < tmp->numChildren(); i++) {
+      //    callback(tmp->child(i));
+      //  }
+      //} else {
+      //  callback(leaf);
+      //}
     }
 
-    template <typename Func> void searchMultiLeafProt(double* query, const Func& callback) {
-      MinNQueue<std::pair<double, Node*>> searchQ(minLeaves-1);
-      Node* tmp = root;
-
-      while (!tmp->isLeaf()) {
-        Node* minNode = nullptr;
-        double minDist = DBL_MAX;
-        for (int i = 0; i < tmp->numChildren(); i++) {
-          Node* tmpNode = tmp->child(i);
-          double tmpDist = dist(query, tmpNode->position());
-          if (tmpDist < minDist) {
-            minNode = tmpNode;
-            minDist = tmpDist;
-          } else {
-            searchQ.add(std::make_pair(tmpDist, tmpNode));
-          }
-        }
-        tmp = minNode;
-      }
-      callback(tmp);
-      for (auto pair : *searchQ.container()) {
-        callback(nearestLeaf(pair.second, query));
-      }
-    }
-
-    template <typename Func> void searchMultiLeafProtRecur(double* query, const Func& callback) {
+    // args: minLeaves
+    template <typename Func> void searchMultiLeafProt(double* query, const Func& callback, va_list* args) {
       using DistPair = std::pair<double, Node*>;
-      MinNMap<double, Node*> searchQ(minLeaves);
+      MinNList<double, Node*> searchQ(forest->minLeaves);
       searchQ.add(0, root);
 
-      for (int i = 0; i < minLeaves && !searchQ.empty(); i++) {
-        auto tmpP = searchQ.begin();
-        Node* tmp = tmpP->second;
-        searchQ.erase(tmpP);
+      for (size_t i = 0; i < forest->minLeaves && !searchQ.empty(); i++) {
+        auto tmpPair = searchQ.begin();
+        Node* tmpNode = tmpPair->second;
+        searchQ.erase(tmpPair);
         searchQ.n--;
 
-        while (!tmp->isLeaf()) {
+        while (!tmpNode->isLeaf()) {
           DistPair minPair(DBL_MAX, nullptr);
-          for (int i = 0; i < tmp->numChildren(); i++) {
-            Node* tmpNode = tmp->child(i);
-            double tmpDist = dist(query, tmpNode->position());
+          for (size_t i = 0; i < tmpNode->numChildren(); i++) {
+            Node* tmpChild = tmpNode->child(i);
+            double tmpDist = dist(query, tmpChild->position());
             if (tmpDist < minPair.first) {
-              minPair = std::make_pair(tmpDist, tmpNode);
+              if (minPair.second != nullptr) {
+                searchQ.add(minPair.first, minPair.second);
+              }
+              minPair = std::make_pair(tmpDist, tmpChild);
             } else {
-              searchQ.add(tmpDist, tmpNode);
+              searchQ.add(tmpDist, tmpChild);
             }
           }
-          tmp = minPair.second;
+          tmpNode = minPair.second;
         }
 
-        callback(tmp);
+        callback(tmpNode);
       }
     }
 
-    template <typename Func> void searchMultiLeafPlane(double* query, const Func& callback) {
+    // args: minLeaves
+    template <typename Func> void searchMultiLeafPlane(double* query, const Func& callback, va_list* args) {
       double* dists = new double[branchFactor];
-      MinNMap<double, Node*> searchQ(minLeaves-1);
+      MinNList<double, Node*> searchQ(forest->minLeaves);
       searchQ.add(0, root);
 
-      Node* tmp = root;
-
-      while (!tmp->isLeaf()) {
-        for (int i = 0; i < tmp->numChildren(); i++) {
-          dists[i] = dist(query, tmp->child(i)->position());
-        }
-        auto minChildP = std::min_element(dists, dists+tmp->numChildren());
-        int minNdx = minChildP - dists;
-        Node* minChild = tmp->child(minNdx);
-        double* minPos = minChild->position();
-
-        for (int i = 0; i < tmp->numChildren(); i++) {
-          if (i == minNdx) { continue; }
-          Node* tmpChild = tmp->child(i);
-          double* tmpPos = tmpChild->position();
-          double tmpDTP = distToPlane(dists[minNdx], dists[i], minPos, tmpPos);
-          searchQ.add(tmpDTP, tmpChild);
-        }
-        
-        tmp = minChild;
-      }
-
-      callback(tmp);
-      for (auto pair : searchQ) {
-        callback(nearestLeaf(pair.second, query));
-      }
-      delete[] dists;
-    }
-
-    template <typename Func> void searchMultiLeafPlaneRecur(double* query, const Func& callback) {
-      double* dists = new double[branchFactor];
-      MinNMap<double, Node*> searchQ(minLeaves);
-      searchQ.add(0, root);
-
-      for (int i = 0; i < minLeaves && !searchQ.empty(); i++) {
-        auto tmpP = searchQ.begin();
-        Node* tmp = tmpP->second;
-        searchQ.erase(tmpP);
+      for (size_t i = 0; i < forest->minLeaves && !searchQ.empty(); i++) {
+        auto tmpPair = searchQ.begin();
+        Node* tmpNode = tmpPair->second;
+        searchQ.erase(tmpPair);
         searchQ.n--;
 
-        while (!tmp->isLeaf()) {
-          for (int i = 0; i < tmp->numChildren(); i++) {
-            dists[i] = dist(query, tmp->child(i)->position());
+        while (!tmpNode->isLeaf()) {
+          for (size_t i = 0; i < tmpNode->numChildren(); i++) {
+            dists[i] = dist(query, tmpNode->child(i)->position());
           }
-          auto minChildP = std::min_element(dists, dists+tmp->numChildren());
-          int minNdx = minChildP - dists;
-          Node* minChild = tmp->child(minNdx);
+          auto minChildP = std::min_element(dists, dists+tmpNode->numChildren());
+          size_t minNdx = minChildP - dists;
+          Node* minChild = tmpNode->child(minNdx);
           double* minPos = minChild->position();
 
-          for (int i = 0; i < tmp->numChildren(); i++) {
+          for (size_t i = 0; i < tmpNode->numChildren(); i++) {
             if (i == minNdx) { continue; }
-            Node* tmpChild = tmp->child(i);
+            Node* tmpChild = tmpNode->child(i);
             double* tmpPos = tmpChild->position();
             double tmpDTP = distToPlane(dists[minNdx], dists[i], minPos, tmpPos);
             searchQ.add(tmpDTP, tmpChild);
           }
           
-          tmp = minChild;
+          tmpNode = minChild;
         }
 
-        callback(tmp);
+        callback(tmpNode);
       }
       delete[] dists;
     }
 
-    void printNode(Node* node, int depth) {
+    // args: minLeaves
+    template <typename Func> void searchLeafGraph(double* query, const Func& callback, va_list *args) {
+      std::unordered_set<Node*> visitedNodes;
+      MinNList<double, Node*> searchQ(forest->minLeaves);
+      Node* defeatistNode = nearestLeaf(root, query);
+
+      visitedNodes.insert(defeatistNode);
+      searchQ.add(0, defeatistNode);
+
+      for (size_t i = 0; i < forest->minLeaves && !searchQ.empty(); i++) {
+        auto tmpPair = searchQ.begin();
+        Node* tmpNode = tmpPair->second;
+        searchQ.erase(tmpPair);
+        searchQ.n--;
+
+        for (int ndx : *tmpNode->contents()) {
+          for (Node* tmpNeighbor : leafLookup[ndx]) {
+            if (!visitedNodes.insert(tmpNeighbor).second) {
+              continue;
+            }
+            
+            double tmpDist = dist(query, tmpNeighbor->position());
+            searchQ.add(tmpDist, tmpNeighbor);
+          }
+        }
+
+        callback(tmpNode);
+      }
+    }
+
+    void printNode(Node* node, size_t depth) {
       printIndent(depth);
       printf("%d ", node->id());
-      //printData(node->position());
+      printData(node->position(), node->avg()->label());
       //printf("(%d) ", node->avg()->count);
 
       if (node->isLeaf()) {
@@ -665,39 +692,39 @@ template <class Node> class VQTree {
       }
       putchar('\n');
     }
-    void printIndent(int depth) {
-      for (int i = 0; i < depth; i++) {
+    void printIndent(size_t depth) {
+      for (size_t i = 0; i < depth; i++) {
         printf("  ");
       }
     }
     void printContents(Node* node) {
       printf("- ");
       auto& contents = *node->contents();
-      for (int i = 0; i < contents.size(); i++) {
+      for (size_t i = 0; i < contents.size(); i++) {
         printData(getData(contents[i]), getLabel(contents[i]));
       }
       printf(" [");
-      for (int i = 0; i < contents.size(); i++) {
+      for (size_t i = 0; i < contents.size(); i++) {
         if (i != 0) { putchar(','); }
         printf("%d", contents[i]);
       }
       putchar(']');
     }
     void printData(double* data, double target) {
-      //putchar('[');
-      //for (size_t i = 0; i < dim; i++) {
-      //  if (i != 0) { putchar(','); }
-      //  printf("%0.4f", data[i]);
-      //}
+      putchar('[');
+      for (size_t i = 0; i < dim; i++) {
+        if (i != 0) { putchar(','); }
+        printf("%0.4f", data[i]);
+      }
       //printf("(%.2f)", target);
-      //putchar(']');
-      printf("[%.4f]", target);
+      putchar(']');
+      //printf("[%.4f]", target);
     }
     void printChildren(Node* node) {
       putchar('[');
-      for (int i = 0; i < node->numChildren(); i++) {
+      for (size_t i = 0; i < node->numChildren(); i++) {
         if (i != 0) { putchar(','); }
-        printf("%d", node->child(i)->avg()->count);
+        printf("%zu", node->child(i)->avg()->count);
       }
       putchar(']');
     }
@@ -710,7 +737,7 @@ class MeanTreeNode : public VQTreeNode<MeanTreeNode> {
     Node* childA = nullptr;
     Node* childB = nullptr;
 
-    inline int numChildren() { return childA == nullptr ? 0 : 2; }
+    inline size_t numChildren() { return childA == nullptr ? 0 : 2; }
 
     inline Node* child(int ndx) { return ndx == 0 ? childA : childB; }
 
@@ -841,7 +868,7 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
     std::vector<Node*>* children = nullptr;
     size_t childNdx = -1;
 
-    inline int numChildren() { return children == nullptr ? 0 : children->size(); }
+    inline size_t numChildren() { return children == nullptr ? 0 : children->size(); }
 
     inline Node* child(int ndx) { return (*children)[ndx]; }
 
@@ -862,18 +889,18 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
             continue;
           }
 
-          int nChildren = tmp->numChildren();
-          for (int i = 0; i < nChildren; i++) {
+          size_t nChildren = tmp->numChildren();
+          for (size_t i = 0; i < nChildren; i++) {
             dists[i] = tree->dist(data, tmp->child(i)->position());
           }
           auto minChildP = std::min_element(dists, dists+nChildren);
-          int minNdx = minChildP - dists;
+          size_t minNdx = minChildP - dists;
           Node* minChild = tmp->child(minNdx);
           double* minPos = minChild->position();
 
           q.push(minChild);
 
-          for (int i = 0; i < nChildren; i++) {
+          for (size_t i = 0; i < nChildren; i++) {
             if (i == minNdx) { continue; }
             Node* tmpChild = tmp->child(i);
             double* tmpChildPos = tmpChild->position();
@@ -937,15 +964,15 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
     }
     bool checkInvariantLocal() {
       if (!std::isfinite(position()[0])) {
-        printf("Fail PosFinite: %f\n", position()[0]);
+        fprintf(stderr, "Fail PosFinite: %f\n", position()[0]);
         return false;
       }
       if (!isLeaf()) {
         if (numChildren() > tree->branchFactor) {
-          printf("Fail BranchFactor: %d vs %zu\n", numChildren(), tree->branchFactor);
+          fprintf(stderr, "Fail BranchFactor: %zu vs %zu\n", numChildren(), tree->branchFactor);
           return false;
         }
-        int childPosCount = 0;
+        size_t childPosCount = 0;
         for (size_t i = 0; i < children->size(); i++) {
           Node* child = (*children)[i];
           childPosCount += child->avg()->count;
@@ -955,16 +982,16 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
           }
         }
         if (avg()->count != childPosCount) {
-          printf("Fail PosCount: %d vs %d\n", avg()->count, childPosCount);
+          fprintf(stderr, "Fail PosCount: %zu vs %zu\n", avg()->count, childPosCount);
           return false;
         }
       } else {
         if (contents()->size() > tree->maxLeafSize) {
-          printf("Fail MaxLeafSize: %zu vs %zu\n", contents()->size(), tree->maxLeafSize);
+          fprintf(stderr, "Fail MaxLeafSize: %zu vs %zu\n", contents()->size(), tree->maxLeafSize);
           return false;
         }
         if (avg()->count != contents()->size()) {
-          printf("Fail Leaf PosCount: %d vs %zu\n", avg()->count, contents()->size());
+          fprintf(stderr, "Fail Leaf PosCount: %zu vs %zu\n", avg()->count, contents()->size());
           return false;
         }
       }
@@ -1071,7 +1098,7 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
       Node* sibling = new Node(tree, parent);
 
       std::vector<int>* labels = twoMeansLeaf();
-      /*for (int i = 0; i < labels->size(); i++) {
+      /*for (size_t i = 0; i < labels->size(); i++) {
         if ((*labels)[i] == 1) {
           int tmpNdx = (*contents())[i];
           tree->unregisterLeaf(this, tmpNdx);
@@ -1106,7 +1133,7 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
       labeledMove(labels, children, sibling->children);
 #ifdef DNDEBUG
       if (children->size() == 0 || sibling->children->size() == 0) {
-        printf("Invalid children size after move... %zu %zu\n", this->children->size(), sibling->children->size());
+        fprintf(stderr, "Invalid children size after move... %zu %zu\n", this->children->size(), sibling->children->size());
         std::cout << *labels << std::endl;
       }
 #endif
@@ -1140,12 +1167,16 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
       posA.add(posMean.position(), 0);
       posB.add(posMean.position(), 0);
 
+      std::vector<size_t> perm(data->size());
+      std::iota(perm.begin(), perm.end(), 0);
+      std::shuffle(perm.begin(), perm.end(), tree->forest->randEngine);
+
       std::vector<int>* labels = new std::vector<int>(data->size(), -1);
 
       bool flag = true, first = true;
-      for (int count = 0; count < 50 && flag; count++) {
+      for (int count = 0; count < MAX_ITERS && flag; count++) {
         flag = false;
-        for (size_t i = 0; i < data->size(); i++) {
+        for (size_t i : perm) {
           double* dat = (*data)[i];
           double dA = tree->dist(posA.position(), dat);
           double dB = tree->dist(posB.position(), dat);
@@ -1208,7 +1239,7 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
 #ifndef DNDEBUG
       for (Node* tmp = this; tmp != nullptr; tmp = tmp->parent) {
         if (!tmp->checkInvariantLocal()) {
-          printf("!!!!!! %d\ndistUp:%d distDown:%d id:%d\n", ndx, distUp(), distDown(), tmp->_id);
+          fprintf(stderr, "!!!!!! %d\ndistUp:%d distDown:%d id:%d\n", ndx, distUp(), distDown(), tmp->_id);
           tree->printTree();
         }
       }
@@ -1218,4 +1249,32 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
 };
 
 using MeanTree = VQTree<MeanTreeNode>;
+using MeanForest = VQForest<MeanTreeNode>;
 using KTree = VQTree<KTreeNode>;
+using KForest = VQForest<KTreeNode>;
+
+template <class Node> class VQForestBuilder {
+  public:
+    size_t dim_, memorySize_;
+
+    VQForestBuilder(size_t dim, size_t memorySize) : dim_(dim), memorySize_(memorySize) {}
+    
+#define SETTER(type, var, def) type var##_ = def; VQForestBuilder<Node>& var(type var) { this->var##_ = var; return *this; }
+    SETTER(size_t, maxLeafSize, 64)
+    SETTER(size_t, branchFactor, 16)
+    SETTER(double, spill, -1.)
+    SETTER(bool, removeDups, true)
+    SETTER(size_t, numTrees, 1)
+    SETTER(size_t, minLeaves, 100)
+    SETTER(double, exactEps, 0.1)
+    SETTER(int, searchType, VQSEARCH_PLANE_DIST)
+    SETTER(long, randSeed, 9)
+#undef SETTER
+  
+    VQForest<Node>* build() {
+      return new VQForest<Node>(dim_, memorySize_, maxLeafSize_, branchFactor_, spill_, removeDups_, numTrees_, minLeaves_, exactEps_, searchType_, randSeed_);
+    }
+};
+
+using KForestBuilder = VQForestBuilder<KTreeNode>;
+using MeanForestBuilder = VQForestBuilder<MeanTreeNode>;

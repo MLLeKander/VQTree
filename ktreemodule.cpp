@@ -1,16 +1,38 @@
 #include "module_base.cpp"
 
+#define METHDEF(cppName, pyName) {#pyName, py_##cppName<KTreeNode>, METH_VARARGS, cppName##__doc__ }
 static PyMethodDef ktreeMethods[] = {
-  {"init",        py_init<KTreeNode>,       METH_VARARGS, init__doc__      },
-  {"free",        py_free<KTreeNode>,       METH_VARARGS, free__doc__      },
-  {"add",         py_add<KTreeNode>,        METH_VARARGS, add__doc__       },
-  {"query",       py_query<KTreeNode>,      METH_VARARGS, query__doc__     },
-  {"size",        py_size<KTreeNode>,       METH_VARARGS, size__doc__      },
-  {"count_nodes", py_countNodes<KTreeNode>, METH_VARARGS, countNodes__doc__},
-  {"print_tree",  py_printTree<KTreeNode>,  METH_VARARGS, printTree__doc__ },
-  {"leaf_stats",  py_leafStats<KTreeNode>,  METH_VARARGS, leafStats__doc__ },
+  METHDEF(init, init),
+  METHDEF(free, free),
+  METHDEF(add, add),
+  METHDEF(clear, clear),
+  METHDEF(neighbors, neighbors),
+  METHDEF(getData, get_data),
+  METHDEF(getLabel, get_label),
+  METHDEF(size, size),
+  METHDEF(countNodes, count_nodes),
+  METHDEF(printTree, print_tree),
+  METHDEF(leafStats, leaf_stats),
+  METHDEF(isActive, is_active),
+  METHDEF(enforceTreeConsistencyFull, enforce_tree_consistency_full),
+  METHDEF(enforceTreeConsistencyAt, enforce_tree_consistency_at),
+  METHDEF(enforceTreeConsistencyRandom, enforce_tree_consistency_random),
+  METHDEF(dim, get_dim),
+  METHDEF(memorySize, get_memory_size),
+  METHDEF(maxLeafSize, get_max_leaf_size),
+  METHDEF(branchFactor, get_branch_factor),
+  METHDEF(spill, get_spill),
+  METHDEF(removeDups, get_remove_dups),
+  METHDEF(numTrees, get_num_trees),
+  METHDEF(minLeaves, get_min_leaves),
+  METHDEF(exactEps, get_exact_eps),
+  METHDEF(defaultSearchType, get_search_type),
+  METHDEF(set_minLeaves, set_min_leaves),
+  METHDEF(set_exactEps, set_exact_eps),
+  METHDEF(set_defaultSearchType, set_search_type),
   {NULL, NULL, 0, NULL}
 };
+#undef METHDEF
 
 PyDoc_STRVAR(ktree__doc__,"KTree data structure for online kernel regression");
 PyMODINIT_FUNC init_ktree(void) {

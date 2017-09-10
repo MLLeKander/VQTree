@@ -9,7 +9,7 @@ class OnlineAverage {
     double* pos;
     double lblSum = 0;
     double lbl = 0;
-    int count = 0;
+    size_t count = 0;
 
     OnlineAverage(int dim_) : dim(dim_), posSum(new double[dim_]()), pos(new double[dim_]()) {}
 
@@ -46,6 +46,7 @@ class OnlineAverage {
     }
 
     void remove(double* pos_, double lbl_) {
+      assert(count > 0);
       count--;
       for (int i = 0; i < dim; i++) {
         posSum[i] -= pos_[i];
