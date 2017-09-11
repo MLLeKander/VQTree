@@ -940,7 +940,7 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
       for (Node* tmp = this; tmp != nullptr; tmp = tmp->parent) {
         tmp->avg()->remove(data, label);
       }
-      if (contents()->size() == 0) {
+      if (contents()->size() == 0 && parent != nullptr) {
         parent->freeChild(this);
       }
     }
