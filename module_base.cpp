@@ -106,7 +106,7 @@ template <class Node> static PyObject* py_add(PyObject* self, PyObject* args) {
   return PyInt_FromSize_t(ndx);
 }
 
-PyDoc_STRVAR(clear__doc__,"clear(VQForest, ndx) -> num_removals");
+PyDoc_STRVAR(clear__doc__,"clear(VQForest, ndx) -> old_ndx");
 template <class Node> static PyObject* py_clear(PyObject* self, PyObject* args) {
   VQForest<Node>* forest;
   size_t ndx;
@@ -114,9 +114,15 @@ template <class Node> static PyObject* py_clear(PyObject* self, PyObject* args) 
     return NULL;
   }
 
-  size_t removals = forest->clear(ndx);
+  size_t oldNdx;
+  try {
+    oldNdx = forest->clearAndReplace(ndx);
+  } catch (const std::invalid_argument& e) {
+    PyErr_SetString(PyExc_ValueError, "Attempt to clear invalid index.");
+    return NULL;
+  }
 
-  return PyInt_FromSize_t(removals);
+  return PyInt_FromSize_t(oldNdx);
 }
 
 PyDoc_STRVAR(enforceTreeConsistencyFull__doc__,"enforce_tree_consistency_full(VQForest) -> num_cycles");

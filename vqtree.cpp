@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 #include "prettyprint.hpp"
 #include "utils.hpp"
 //#undef DNDEBUG
@@ -76,8 +77,8 @@ template <class Node> class VQForest {
     using MinDistQ = MinNQueue<std::pair<double, int>>;
     using Tree = VQTree<Node>;
     std::vector<Tree*> trees;
-    size_t currNdx = 0;
-    bool wrap = false;
+    ssize_t headNdx = -1;
+    size_t tailNdx = 0;
     size_t dim;
     size_t memorySize;
 
@@ -115,34 +116,65 @@ template <class Node> class VQForest {
     double* getData(int ndx) { return dat+dim*ndx; }
     double getLabel(int ndx) { return lbl[ndx]; }
 
-    int add(double* data, double label) {
-      if (currNdx >= memorySize) {
-        wrap = true;
-        currNdx = 0;
+    size_t add(double* data, double label, bool includeClears=false) {
+      if (size() == memorySize) {
+        clearAndReplace(tailNdx);
       }
-      int ndx = currNdx++;
-      if (wrap) {
-        clear(ndx);
+
+      headNdx++;
+      if (((size_t)headNdx) >= memorySize) {
+        headNdx = 0;
       }
+
+      size_t ndx = headNdx;
       std::memcpy(getData(ndx), data, dim*sizeof(*data));
       lbl[ndx] = label;
       for (Tree* tree : trees) {
-        int oldNdx = tree->add(ndx);
+        ssize_t oldNdx = tree->add(ndx);
         if (oldNdx != -1) {
           lbl[ndx] = std::max(lbl[oldNdx], lbl[ndx]);
-          clear(oldNdx);
+          //TODO: Proper return for this?
+          clearAndReplace(oldNdx);
         }
       }
         
       return ndx;
     }
 
-    size_t clear(int ndx) {
-      size_t out = 0;
-      for (Tree* tree : trees) {
-        out += tree->clear(ndx);
+    size_t ndxWrapUp(ssize_t ndx) {
+      return ndx >= ((ssize_t)tailNdx) ? ndx : ndx + memorySize;
+    }
+
+    size_t clearAndReplace(size_t ndx) {
+      if (ndxWrapUp(ndx) > ndxWrapUp(headNdx)) {
+        throw std::invalid_argument("Attempt to clear invalid ndx.");
       }
-      return out;
+
+      for (Tree* tree : trees) {
+        tree->clear(ndx);
+      }
+
+      size_t oldNdx = tailNdx;
+      if (oldNdx != ndx) {
+        std::memcpy(getData(ndx), getData(oldNdx), dim*sizeof(*dat));
+        lbl[ndx] = lbl[oldNdx];
+
+        for (Tree* tree : trees) {
+          tree->relabel(oldNdx, ndx);
+        }
+      }
+
+      if (size() == 1) { // Special case if buffer will be empty
+        headNdx = -1;
+        tailNdx = 0;
+      } else {
+        tailNdx++;
+        if (tailNdx >= memorySize) {
+          tailNdx = 0;
+        }
+      }
+
+      return oldNdx;
     }
 
     std::vector<int>* nearestNeighborsNdxes(double* queryData, int n, int searchType=-1) {
@@ -217,7 +249,7 @@ template <class Node> class VQForest {
     }
 
     size_t size() {
-      return wrap ? memorySize : currNdx;
+      return headNdx == -1 ? 0 : ndxWrapUp(headNdx) - tailNdx + 1;
     }
 
     int countNodes() {
@@ -291,13 +323,23 @@ template <class Node> class VQTree {
       return root->add(ndx);
     }
 
-    size_t clear(int ndx) {
-      size_t out = leafLookup[ndx].size();
+    void clear(size_t ndx) {
       for (Node* tmpNode : leafLookup[ndx]) {
         tmpNode->remove(ndx);
       }
       leafLookup[ndx].clear();
-      return out;
+    }
+
+    void relabel(size_t oldNdx, size_t newNdx) {
+      assert(!isActive(newNdx));
+      for (Node* tmpNode : leafLookup[oldNdx]) {
+        auto* contents = tmpNode->contents();
+        auto search = std::find(contents->begin(), contents->end(), oldNdx);
+        assert(search != contents->end());
+        *search = newNdx;
+      }
+      leafLookup[newNdx] = leafLookup[oldNdx];
+      leafLookup[oldNdx].clear();
     }
 
     Node* closestChild(Node* n, double* data) {
