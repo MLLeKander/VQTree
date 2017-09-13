@@ -5,10 +5,13 @@
 #include <queue>
 #include <unordered_map>
 
+#define _unused(x) ((void)(x))
+
 
 template<class Container, class E> bool contains(Container* lst, E element) {
   return std::find(lst->begin(), lst->end(), element) != lst->end();
 }
+
 
 template <class T> class MinNQueue : public std::priority_queue<T> {
   public:

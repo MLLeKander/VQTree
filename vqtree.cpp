@@ -11,7 +11,6 @@
 #include <stdexcept>
 #include "prettyprint.hpp"
 #include "utils.hpp"
-//#undef DNDEBUG
 
 #define MAX_ITERS 50
 
@@ -99,7 +98,9 @@ template <class Node> class VQForest {
         dim(dim), memorySize(memorySize), minLeaves(minLeaves), exactEps(exactEps),
         defaultSearchType(searchType), dat(new double[dim*memorySize]),
         lbl(new double[memorySize]), randEngine(randSeed), removeDups(removeDups) {
-      assert(numTrees > 0);
+      if (numTrees <= 0) {
+        throw std::invalid_argument("numTrees must not be zero.");
+      }
       for (size_t i = 0; i < numTrees; i++) {
         trees.push_back(new Tree(dim, memorySize, maxLeafSize, branchFactor, spill, removeDups, this));
       }
@@ -149,7 +150,9 @@ template <class Node> class VQForest {
       lbl[ndx] = label;
       if (removeDups) {
         assert(lookupExact->find(getData(ndx)) == lookupExact->end() && "Key was already inserted?");
-        lookupExact->insert(std::make_pair(getData(ndx), ndx));
+        auto insertResult = lookupExact->insert(std::make_pair(getData(ndx), ndx));
+        assert(insertResult.second && "Insert failed?");
+        _unused(insertResult);
       }
 
       for (Tree* tree : trees) {
@@ -164,7 +167,7 @@ template <class Node> class VQForest {
     }
 
     size_t clearAndReplace(size_t ndx) {
-      if (ndxWrapUp(ndx) > ndxWrapUp(headNdx)) {
+      if (size() == 0 || ndxWrapUp(ndx) > ndxWrapUp(headNdx)) {
         throw std::invalid_argument("Attempt to clear invalid ndx.");
       }
 
@@ -174,6 +177,7 @@ template <class Node> class VQForest {
       if (removeDups) {
         size_t eraseResult = lookupExact->erase(getData(ndx));
         assert(eraseResult == 1 && "Attempt to clear index not in lookupExact?");
+        _unused(eraseResult);
       }
 
       size_t oldNdx = tailNdx;
@@ -181,8 +185,12 @@ template <class Node> class VQForest {
         std::memcpy(getData(ndx), getData(oldNdx), dim*sizeof(*getData(oldNdx)));
         lbl[ndx] = lbl[oldNdx];
         if (removeDups) {
-          assert(lookupExact->find(getData(ndx)) != lookupExact->end() && "Expected value to be previously inserted.");
-          (*lookupExact)[getData(ndx)] = ndx;
+          size_t eraseResult = lookupExact->erase(getData(oldNdx));
+          assert(eraseResult == 1 && "oldNdx wasn't in lookupExact?");
+          _unused(eraseResult);
+          auto insertResult = lookupExact->insert(std::make_pair(getData(ndx), ndx));
+          assert(insertResult.second && "Insert failed?");
+          _unused(insertResult);
         }
 
         for (Tree* tree : trees) {
@@ -1278,12 +1286,14 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
 
     void addToLeaf(int ndx, double* data, double label) {
       tree->registerLeaf(this, ndx);
+#ifndef NDEBUG
       if (tree->removeDups) {
         auto matchPtr = std::find_if(contents()->begin(), contents()->end(), [data, this](int i) {
           return doesMatch(data, tree->getData(i));
         });
         assert(matchPtr == contents()->end() && "Duplicates should be handled elsewhere...");
       }
+#endif
       for (Node* tmp = this; tmp != nullptr; tmp = tmp->parent) {
         tmp->avg()->add(data, label);
       }
@@ -1296,7 +1306,7 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
           parent->addChild(splitLeaf());
         }
       }
-#ifndef DNDEBUG
+#ifndef NDEBUG
       for (Node* tmp = this; tmp != nullptr; tmp = tmp->parent) {
         if (!tmp->checkInvariantLocal()) {
           fprintf(stderr, "!!!!!! %d\ndistUp:%d distDown:%d id:%d\n", ndx, distUp(), distDown(), tmp->_id);

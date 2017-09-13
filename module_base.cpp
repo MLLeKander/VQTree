@@ -66,10 +66,14 @@ template <class Node> static PyObject* py_init(PyObject* self, PyObject* args) {
   if (!PyArg_ParseTuple(args, "nnnndinndil", &dim, &memorySize, &maxLeafSize, &branchFactor, &spill, &removeDups, &numTrees, &minLeaves, &exactEps, &searchType, &randSeed)) {
     return NULL;
   }
-
-  VQForest<Node>* forest = new VQForest<Node>(dim, memorySize, maxLeafSize, branchFactor, spill, removeDups != 0, numTrees, minLeaves, exactEps, searchType, randSeed);
-  PyObject* out = PyCapsule_New(forest, VQForest_NAME, NULL);
-  return out;
+  try {
+    VQForest<Node>* forest = new VQForest<Node>(dim, memorySize, maxLeafSize, branchFactor, spill, removeDups != 0, numTrees, minLeaves, exactEps, searchType, randSeed);
+    PyObject* out = PyCapsule_New(forest, VQForest_NAME, NULL);
+    return out;
+  } catch (const std::invalid_argument& e) {
+    PyErr_SetString(PyExc_ValueError, "Invalid argument.");
+    return NULL;
+  }
 }
 
 PyDoc_STRVAR(free__doc__,"free(VQForest)");
