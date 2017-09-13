@@ -67,7 +67,7 @@ template <class Node_> class VQTreeNode {
 
     virtual size_t numChildren() = 0;
     virtual Node* child(int ndx) = 0;
-    virtual int add(int ndx) = 0;
+    virtual void add(int ndx) = 0;
     virtual void remove(int ndx) = 0;
     virtual double* childPosition(int ndx) { return child(ndx)->position(); }
 };
@@ -91,11 +91,14 @@ template <class Node> class VQForest {
     double* lbl;
     std::default_random_engine randEngine;
 
+    bool removeDups;
+    ArrMap<double, size_t>* lookupExact = nullptr;
+
   public:
     VQForest(size_t dim, size_t memorySize, size_t maxLeafSize, size_t branchFactor, double spill, bool removeDups, size_t numTrees, size_t minLeaves, double exactEps, int searchType, long randSeed) :
         dim(dim), memorySize(memorySize), minLeaves(minLeaves), exactEps(exactEps),
         defaultSearchType(searchType), dat(new double[dim*memorySize]),
-        lbl(new double[memorySize]), randEngine(randSeed) {
+        lbl(new double[memorySize]), randEngine(randSeed), removeDups(removeDups) {
       assert(numTrees > 0);
       for (size_t i = 0; i < numTrees; i++) {
         trees.push_back(new Tree(dim, memorySize, maxLeafSize, branchFactor, spill, removeDups, this));
@@ -106,17 +109,32 @@ template <class Node> class VQForest {
       for (size_t i = 0; i < memorySize; i++) {
         lbl[i] = i;
       }
+      if (removeDups) {
+        lookupExact = new ArrMap<double, size_t>(memorySize*1.2, ArrHasher<double>(dim), ArrEqualer<double>(dim));
+      }
     }
 
     ~VQForest() {
       delete[] dat;
       delete[] lbl;
+      if (removeDups) {
+        delete lookupExact;
+      }
     }
 
     double* getData(int ndx) { return dat+dim*ndx; }
     double getLabel(int ndx) { return lbl[ndx]; }
 
     size_t add(double* data, double label, bool includeClears=false) {
+      if (removeDups) {
+        auto findResult = lookupExact->find(data);
+        if (findResult != lookupExact->end()) {
+          int oldNdx = findResult->second;
+          label = std::max(label, getLabel(oldNdx));
+          clearAndReplace(oldNdx);
+        }
+      }
+
       if (size() == memorySize) {
         clearAndReplace(tailNdx);
       }
@@ -129,15 +147,15 @@ template <class Node> class VQForest {
       size_t ndx = headNdx;
       std::memcpy(getData(ndx), data, dim*sizeof(*data));
       lbl[ndx] = label;
-      for (Tree* tree : trees) {
-        ssize_t oldNdx = tree->add(ndx);
-        if (oldNdx != -1) {
-          lbl[ndx] = std::max(lbl[oldNdx], lbl[ndx]);
-          //TODO: Proper return for this?
-          clearAndReplace(oldNdx);
-        }
+      if (removeDups) {
+        assert(lookupExact->find(getData(ndx)) == lookupExact->end() && "Key was already inserted?");
+        lookupExact->insert(std::make_pair(getData(ndx), ndx));
       }
-        
+
+      for (Tree* tree : trees) {
+        tree->add(ndx);
+      }
+
       return ndx;
     }
 
@@ -153,11 +171,19 @@ template <class Node> class VQForest {
       for (Tree* tree : trees) {
         tree->clear(ndx);
       }
+      if (removeDups) {
+        size_t eraseResult = lookupExact->erase(getData(ndx));
+        assert(eraseResult == 1 && "Attempt to clear index not in lookupExact?");
+      }
 
       size_t oldNdx = tailNdx;
       if (oldNdx != ndx) {
-        std::memcpy(getData(ndx), getData(oldNdx), dim*sizeof(*dat));
+        std::memcpy(getData(ndx), getData(oldNdx), dim*sizeof(*getData(oldNdx)));
         lbl[ndx] = lbl[oldNdx];
+        if (removeDups) {
+          assert(lookupExact->find(getData(ndx)) != lookupExact->end() && "Expected value to be previously inserted.");
+          (*lookupExact)[getData(ndx)] = ndx;
+        }
 
         for (Tree* tree : trees) {
           tree->relabel(oldNdx, ndx);
@@ -319,8 +345,8 @@ template <class Node> class VQTree {
     double* getData(int ndx) { return forest->getData(ndx); }
     double getLabel(int ndx) { return forest->getLabel(ndx); }
 
-    int add(int ndx) {
-      return root->add(ndx);
+    void add(int ndx) {
+      root->add(ndx);
     }
 
     void clear(size_t ndx) {
@@ -335,7 +361,7 @@ template <class Node> class VQTree {
       for (Node* tmpNode : leafLookup[oldNdx]) {
         auto* contents = tmpNode->contents();
         auto search = std::find(contents->begin(), contents->end(), oldNdx);
-        assert(search != contents->end());
+        assert(search != contents->end() && "Couldn't find item in leaf node.");
         *search = newNdx;
       }
       leafLookup[newNdx] = leafLookup[oldNdx];
@@ -783,7 +809,7 @@ class MeanTreeNode : public VQTreeNode<MeanTreeNode> {
 
     inline Node* child(int ndx) { return ndx == 0 ? childA : childB; }
 
-    int add(int ndx) {
+    void add(int ndx) {
       double* data = tree->getData(ndx);
       double label = tree->getLabel(ndx);
       Node* tmp = this;
@@ -816,12 +842,12 @@ class MeanTreeNode : public VQTreeNode<MeanTreeNode> {
           tmp->convertLeafToInner();
         }
       } else {
+        assert(false);
         while (!tmp->isRoot()) {
           tmp = tmp->parent;
           tmp->avg()->remove(data, label);
         }
       }
-      return matchNdx;
     }
 
     void remove(int ndx) {
@@ -914,10 +940,9 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
 
     inline Node* child(int ndx) { return (*children)[ndx]; }
 
-    int add(int ndx) {
+    void add(int ndx) {
       double* data = tree->getData(ndx);
       double label = tree->getLabel(ndx);
-      int out = -1;
 
       if (tree->spill >= 0) {
         double* dists = new double[tree->branchFactor];
@@ -927,7 +952,7 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
           Node* tmp = q.front();
           q.pop();
           if (tmp->isLeaf()) {
-            out = std::max(out, tmp->addToLeaf(ndx, data, label));
+            tmp->addToLeaf(ndx, data, label);
             continue;
           }
 
@@ -958,10 +983,8 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
         while (!tmp->isLeaf()) {
           tmp = tree->closestChild(tmp, data);
         }
-        out = tmp->addToLeaf(ndx, data, label);
+        tmp->addToLeaf(ndx, data, label);
       }
-
-      return out;
     }
 
     void remove(int ndx) {
@@ -1253,18 +1276,13 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
       return true;
     }
 
-    int addToLeaf(int ndx, double* data, double label) {
+    void addToLeaf(int ndx, double* data, double label) {
       tree->registerLeaf(this, ndx);
       if (tree->removeDups) {
         auto matchPtr = std::find_if(contents()->begin(), contents()->end(), [data, this](int i) {
           return doesMatch(data, tree->getData(i));
         });
-        if (matchPtr != contents()->end()) {
-          int out = *matchPtr;
-          tree->unregisterLeaf(this, out);
-          *matchPtr = ndx;
-          return out;
-        }
+        assert(matchPtr == contents()->end() && "Duplicates should be handled elsewhere...");
       }
       for (Node* tmp = this; tmp != nullptr; tmp = tmp->parent) {
         tmp->avg()->add(data, label);
@@ -1286,7 +1304,6 @@ class KTreeNode : public VQTreeNode<KTreeNode> {
         }
       }
 #endif
-      return -1;
     }
 };
 

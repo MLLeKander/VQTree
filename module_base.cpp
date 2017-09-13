@@ -347,6 +347,8 @@ template <class Node> static PyObject* py_##cppName(PyObject* self, PyObject* ar
   return accessor;\
 }
 
+GETTER(tailNdx, tail_ndx, PyInt_FromSize_t(forest->tailNdx))
+GETTER(headNdx, head_ndx, PyInt_FromSize_t(forest->headNdx))
 GETTER(dim, dim, PyInt_FromSize_t(forest->dim))
 GETTER(memorySize, memory_size, PyInt_FromSize_t(forest->memorySize))
 GETTER(maxLeafSize, max_leaf_size, PyInt_FromSize_t(forest->trees[0]->maxLeafSize))

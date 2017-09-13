@@ -17,7 +17,7 @@ import distutils.sysconfig
 cfg_vars = distutils.sysconfig.get_config_vars()
 for key, value in cfg_vars.items():
     if type(value) == str:
-        cfg_vars[key] = value.replace("-Wstrict-prototypes", "")
+        cfg_vars[key] = value.replace("-Wstrict-prototypes", "").replace("-DNDEBUG","")
 
 setup (name = 'vqtree',
        version = '1.0',

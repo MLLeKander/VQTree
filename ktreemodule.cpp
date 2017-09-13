@@ -17,6 +17,8 @@ static PyMethodDef ktreeMethods[] = {
   METHDEF(enforceTreeConsistencyFull, enforce_tree_consistency_full),
   METHDEF(enforceTreeConsistencyAt, enforce_tree_consistency_at),
   METHDEF(enforceTreeConsistencyRandom, enforce_tree_consistency_random),
+  METHDEF(tailNdx, get_tail_ndx),
+  METHDEF(headNdx, get_head_ndx),
   METHDEF(dim, get_dim),
   METHDEF(memorySize, get_memory_size),
   METHDEF(maxLeafSize, get_max_leaf_size),

@@ -56,6 +56,10 @@ class _ForestBase(object):
 
 
 
+    def get_head_ndx(self):
+        return self.module.get_head_ndx(self._forest)
+    def get_tail_ndx(self):
+        return self.module.get_tail_ndx(self._forest)
     def get_dim(self):
         return self.module.get_dim(self._forest)
     def get_memory_size(self):
