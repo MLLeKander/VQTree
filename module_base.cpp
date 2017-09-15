@@ -268,6 +268,36 @@ template <class Node> static PyObject* py_getLabel(PyObject* self, PyObject* arg
   return PyFloat_FromDouble(forest->getLabel(ndx));
 }
 
+PyDoc_STRVAR(isValidNdx__doc__,"is_valid_ndx(VQForest, ndx) -> label");
+template <class Node> static PyObject* py_isValidNdx(PyObject* self, PyObject* args) {
+  VQForest<Node>* forest;
+  size_t ndx;
+  if (!PyArg_ParseTuple(args, "O&n", &capsuleConvert, &forest, &ndx)) {
+    return NULL;
+  }
+
+  return PyBool_FromLong(forest->isValidNdx(ndx));
+}
+
+PyDoc_STRVAR(lookupExact__doc__,"lookup_exact(VQForest, data) -> ndx");
+template <class Node> static PyObject* py_lookupExact(PyObject* self, PyObject* args) {
+  PyObject* arrayObj;
+  VQForest<Node>* forest;
+  if (!PyArg_ParseTuple(args, "O&O", &capsuleConvert, &forest, &arrayObj)) {
+    return NULL;
+  }
+
+  PyArrayObject* array = sanitizeArray(forest, arrayObj);
+  if (array == NULL) {
+    return NULL;
+  }
+
+  size_t ndx = forest->getLookupExact((double*)PyArray_DATA(array));
+  Py_DECREF(array);
+
+  return PyInt_FromSize_t(ndx);
+}
+
 PyDoc_STRVAR(size__doc__,"size(VQForest) -> size");
 template <class Node> static PyObject* py_size(PyObject* self, PyObject* args) {
   VQForest<Node>* forest;
@@ -337,6 +367,20 @@ template <class Node> static PyObject* py_isActive(PyObject* self, PyObject* arg
   }
   
   return PyBool_FromLong(forest->isActive(ndx));
+}
+
+PyDoc_STRVAR(checkConsistency__doc__,"check_consistency(VQForest)");
+template <class Node> static PyObject* py_checkConsistency(PyObject* self, PyObject* args) {
+  VQForest<Node>* forest;
+  if (!PyArg_ParseTuple(args, "O&", &capsuleConvert, &forest)) {
+    return NULL;
+  }
+  if (!forest->checkConsistency()) {
+    PyErr_SetString(PyExc_RuntimeError, "Forest is inconsistent?");
+    return NULL;
+  }
+
+  Py_RETURN_NONE;
 }
 
 

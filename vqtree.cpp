@@ -126,6 +126,16 @@ template <class Node> class VQForest {
     double* getData(int ndx) { return dat+dim*ndx; }
     double getLabel(int ndx) { return lbl[ndx]; }
 
+    size_t getLookupExact(double* data) {
+      if (removeDups) {
+        auto findResult = lookupExact->find(data);
+        if (findResult != lookupExact->end()) {
+          return findResult->second;
+        }
+      }
+      return memorySize;
+    }
+
     size_t add(double* data, double label, bool includeClears=false) {
       if (removeDups) {
         auto findResult = lookupExact->find(data);
@@ -166,8 +176,23 @@ template <class Node> class VQForest {
       return ndx >= ((ssize_t)tailNdx) ? ndx : ndx + memorySize;
     }
 
+    bool isValidNdx(size_t ndx) {
+      return size() != 0 && ndx >= 0 && ndx < memorySize && ndxWrapUp(ndx) <= ndxWrapUp(headNdx);
+    }
+
+    bool checkConsistency() {
+      bool out = true;
+      for (size_t i = 0; i < memorySize; i++) {
+        if (isValidNdx(i) != isActive(i)) {
+          printf("Inconsistent: %zu\n", i);
+          out = false;
+        }
+      }
+      return out;
+    }
+
     size_t clearAndReplace(size_t ndx) {
-      if (size() == 0 || ndxWrapUp(ndx) > ndxWrapUp(headNdx)) {
+      if (!isValidNdx(ndx)) {
         throw std::invalid_argument("Attempt to clear invalid ndx.");
       }
 

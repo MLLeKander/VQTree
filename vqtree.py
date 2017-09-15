@@ -42,6 +42,15 @@ class _ForestBase(object):
     def is_active(self, ndx):
         return self.module.is_active(self._forest, ndx)
 
+    def check_consistency(self):
+        self.module.check_consistency(self._forest)
+
+    def is_valid_ndx(self, ndx):
+        return self.module.is_valid_ndx(self._forest, ndx)
+
+    def lookup_exact(self, data):
+        return self.module.lookup_exact(self._forest, data)
+
 
 
     def neighbors(self, data, n):
