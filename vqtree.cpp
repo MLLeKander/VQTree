@@ -137,12 +137,14 @@ template <class Node> class VQForest {
     }
 
     size_t add(double* data, double label, bool includeClears=false) {
+      size_t out = memorySize;
       if (removeDups) {
         auto findResult = lookupExact->find(data);
         if (findResult != lookupExact->end()) {
           int oldNdx = findResult->second;
           label = std::max(label, getLabel(oldNdx));
           clearAndReplace(oldNdx);
+          out = oldNdx;
         }
       }
 
@@ -169,7 +171,7 @@ template <class Node> class VQForest {
         tree->add(ndx);
       }
 
-      return ndx;
+      return out;
     }
 
     size_t ndxWrapUp(ssize_t ndx) {
